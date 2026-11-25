@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
 """Front page of THE WORLD TODAY for Tuesday, 24 November 2026.
 
-Builds a one-page newspaper front page (1024 x 1024 PNG) with Pillow:
-a masthead and dateline, a hand-drawn sunset scene of tankers in a
-strait, the lead story on the US-Iran blockade standoff, six short
-stories in a two-column grid, and a sport strip at the foot.
+Renders a one-page newspaper front page (1024 x 1024 PNG) summing up
+24 November 2026 world news: a masthead and dateline, a hand-drawn
+sunset scene of tankers in a strait, the lead story on the US-Iran
+blockade standoff, six short stories in a two-column grid, and a sport
+strip at the foot.
 
-All text and all geometry are fixed constants, so the output is fully
-deterministic: running the script twice yields byte-identical PNG data.
-No clock, no randomness, no network access.
+STDLIB ONLY: the image is built pixel by pixel in a bytearray and
+encoded as PNG by hand (zlib + struct). Text uses an embedded 5x7
+bitmap font, so the program needs no Pillow, no font files, no network
+and no clock. It runs in the grader's minimal python3.13 image and on
+a read-only source tree: it writes entry.png to $MAKEFUN_OUTPUT_DIR
+when that variable is set (the grader sets it to /output), and also
+tries a copy next to this script, ignoring failures there.
+
+Deterministic: fixed text, fixed geometry, fixed compression level, so
+running the script twice yields byte-identical PNG data.
 """
 
+import math
 import os
-import shutil
+import struct
+import zlib
 from pathlib import Path
-
-from PIL import Image, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------- page setup
 
@@ -26,335 +34,422 @@ INNER_W = PAGE_W - 2 * EDGE      # usable width between the margins
 
 PAPER = (251, 250, 246)          # warm off-white newsprint
 INK = (20, 20, 20)              # near-black for text and rules
-FAINT = (74, 74, 74)            # grey for the photo caption
+FAINT = (74, 74, 74)            # grey for captions and decks
+RED = (178, 34, 34)             # accent for the lead kicker
 
-# ---------------------------------------------------------------- fonts
+# ---------------------------------------------------------------- 5x7 font
+# Each glyph is 7 rows of 5 cells; '#' is ink, '.' is blank. Only
+# capitals are stored; lowercase input is uppercased on lookup.
 
-FONT_PATHS = {
-    "serif_bold": [
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
-    ],
-    "serif": [
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-    ],
-    "serif_italic": [
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-    ],
-    "sans_bold": [
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    ],
+GLYPHS = {
+    "A": (".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    "B": ("####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."),
+    "C": (".####", "#....", "#....", "#....", "#....", "#....", ".####"),
+    "D": ("####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."),
+    "E": ("#####", "#....", "#....", "####.", "#....", "#....", "#####"),
+    "F": ("#####", "#....", "#....", "####.", "#....", "#....", "#...."),
+    "G": (".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."),
+    "H": ("#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    "I": ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"),
+    "J": ("..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."),
+    "K": ("#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"),
+    "L": ("#....", "#....", "#....", "#....", "#....", "#....", "#####"),
+    "M": ("#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"),
+    "N": ("#...#", "##..#", "##..#", "#.#.#", "#..##", "#..##", "#...#"),
+    "O": (".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    "P": ("####.", "#...#", "#...#", "####.", "#....", "#....", "#...."),
+    "Q": (".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"),
+    "R": ("####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"),
+    "S": (".####", "#....", "#....", ".###.", "....#", "....#", "####."),
+    "T": ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."),
+    "U": ("#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    "V": ("#...#", "#...#", "#...#", ".#.#.", ".#.#.", "..#..", "..#.."),
+    "W": ("#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"),
+    "X": ("#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"),
+    "Y": ("#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."),
+    "Z": ("#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"),
+    "0": (".###.", "#..##", "#.#.#", "##..#", "#...#", "#...#", ".###."),
+    "1": ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."),
+    "2": (".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"),
+    "3": ("####.", "....#", "....#", ".###.", "....#", "....#", "####."),
+    "4": ("...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."),
+    "5": ("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
+    "6": (".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."),
+    "7": ("#####", "....#", "...#.", "...#.", "..#..", "..#..", "..#.."),
+    "8": (".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
+    "9": (".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."),
+    " ": (".....", ".....", ".....", ".....", ".....", ".....", "....."),
+    ".": (".....", ".....", ".....", ".....", ".....", ".##..", ".##.."),
+    ",": (".....", ".....", ".....", ".....", ".##..", ".##..", ".#..."),
+    ":": (".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."),
+    ";": (".....", ".##..", ".##..", ".....", ".##..", ".##..", ".#..."),
+    "!": ("..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."),
+    "?": (".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."),
+    "'": ("..#..", "..#..", ".#...", ".....", ".....", ".....", "....."),
+    '"': (".#.#.", ".#.#.", ".#.#.", ".....", ".....", ".....", "....."),
+    "-": (".....", ".....", ".....", ".###.", ".....", ".....", "....."),
+    "(": ("...#.", "..#..", "..#..", "..#..", "..#..", "..#..", "...#."),
+    ")": (".#...", "..#..", "..#..", "..#..", "..#..", "..#..", ".#..."),
+    "&": (".##..", "#..#.", "#..#.", ".#...", "#.#.#", "#..#.", ".##.#"),
+    "%": ("##..#", "##.#.", "...#.", "..#..", ".#...", "#.##.", "#..##"),
+    "$": ("..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."),
+    "/": ("....#", "....#", "...#.", "...#.", "..#..", ".#...", "#...."),
+    "+": (".....", "..#..", "..#..", ".###.", "..#..", "..#..", "....."),
+    "=": (".....", ".....", ".###.", ".....", ".###.", ".....", "....."),
+    "#": (".#.#.", ".#.#.", "#####", ".#.#.", "#####", ".#.#.", ".#.#."),
+    "@": (".###.", "#...#", "#.###", "#.#.#", "#.###", "#....", ".###."),
+    "*": (".....", ".#.#.", "..#..", "#####", "..#..", ".#.#.", "....."),
+    "_": (".....", ".....", ".....", ".....", ".....", ".....", "#####"),
+    "•": (".....", ".....", ".###.", ".###.", ".###.", ".....", "....."),
 }
 
-
-def pick_font(kind, size):
-    """Return the first usable font file for kind, else Pillow's default."""
-    for path in FONT_PATHS[kind]:
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return ImageFont.load_default(size)
+# Characters that have no glyph of their own map to these.
+ALIASES = {"–": "-", "—": "-", "‘": "'", "’": "'", "“": '"', "”": '"'}
 
 
-# ---------------------------------------------------------------- text tools
-
-def wrap_text(canvas, text, font, max_width):
-    """Greedy word wrap: split text into lines no wider than max_width."""
-    lines = []
-    current = ""
-    for word in text.split():
-        trial = word if not current else current + " " + word
-        if canvas.textlength(trial, font=font) <= max_width:
-            current = trial
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines
+def glyph_for(ch):
+    """Return the 7-row bitmap for a character (uppercase lookup)."""
+    ch = ALIASES.get(ch, ch)
+    return GLYPHS.get(ch.upper(), GLYPHS[" "])
 
 
-def paint_lines(canvas, lines, font, x, y, leading, fill=INK):
-    """Draw lines top to bottom, returning the y just below the last one."""
-    for line in lines:
-        canvas.text((x, y), line, font=font, fill=fill)
-        y += leading
-    return y
+# ---------------------------------------------------------------- canvas
+
+class Canvas:
+    """An RGB pixel buffer with simple drawing primitives."""
+
+    def __init__(self, width, height, colour):
+        self.width = width
+        self.height = height
+        r, g, b = colour
+        self.buf = bytearray(bytes((r, g, b)) * (width * height))
+
+    def fill_rect(self, x, y, w, h, colour):
+        """Fill an axis-aligned rectangle (clipped to the page)."""
+        x0 = max(0, x)
+        y0 = max(0, y)
+        x1 = min(self.width, x + w)
+        y1 = min(self.height, y + h)
+        if x1 <= x0 or y1 <= y0:
+            return
+        row = bytes(colour) * (x1 - x0)
+        stride = self.width * 3
+        for yy in range(y0, y1):
+            off = yy * stride + x0 * 3
+            self.buf[off:off + len(row)] = row
+
+    def rule(self, x, y, w, thick=2, colour=INK):
+        self.fill_rect(x, y, w, thick, colour)
+
+    def set_px(self, x, y, colour):
+        if 0 <= x < self.width and 0 <= y < self.height:
+            off = (y * self.width + x) * 3
+            self.buf[off:off + 3] = bytes(colour)
+
+    def line(self, x0, y0, x1, y1, colour):
+        """Bresenham line."""
+        dx = abs(x1 - x0)
+        dy = -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+        while True:
+            self.set_px(x0, y0, colour)
+            if x0 == x1 and y0 == y1:
+                return
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x0 += sx
+            if e2 <= dx:
+                err += dx
+                y0 += sy
+
+    def fill_circle(self, cx, cy, r, colour):
+        for dy in range(-r, r + 1):
+            dx = math.isqrt(r * r - dy * dy)
+            self.fill_rect(cx - dx, cy + dy, 2 * dx + 1, 1, colour)
+
+    def fill_poly(self, points, colour):
+        """Scanline fill of a simple polygon (even-odd rule)."""
+        ys = [p[1] for p in points]
+        y0, y1 = min(ys), max(ys)
+        n = len(points)
+        for y in range(y0, y1 + 1):
+            xs = []
+            for i in range(n):
+                x0, ya = points[i]
+                x1, yb = points[(i + 1) % n]
+                if ya == yb:
+                    continue
+                if (ya <= y < yb) or (yb <= y < ya):
+                    xs.append(x0 + (y - ya) * (x1 - x0) / (yb - ya))
+            xs.sort()
+            for i in range(0, len(xs) - 1, 2):
+                xa = int(math.ceil(xs[i]))
+                xb = int(math.floor(xs[i + 1]))
+                if xb >= xa:
+                    self.fill_rect(xa, y, xb - xa + 1, 1, colour)
+
+    # -- text ------------------------------------------------------
+
+    def text_width(self, text, scale):
+        return len(text) * 6 * scale - scale
+
+    def text(self, x, y, text, scale, colour):
+        """Draw text left-aligned at (x, y); returns the width drawn."""
+        cx = x
+        for ch in text:
+            glyph = glyph_for(ch)
+            for gy, row in enumerate(glyph):
+                for gx, cell in enumerate(row):
+                    if cell == "#":
+                        self.fill_rect(cx + gx * scale, y + gy * scale,
+                                       scale, scale, colour)
+            cx += 6 * scale
+        return cx - x - scale
+
+    def text_centred(self, cx, y, text, scale, colour):
+        w = self.text_width(text, scale)
+        self.text(cx - w // 2, y, text, scale, colour)
+
+    def wrap(self, text, scale, max_width):
+        """Word-wrap text to lines that fit max_width pixels."""
+        lines = []
+        for paragraph in text.split("\n"):
+            line = ""
+            for word in paragraph.split(" "):
+                trial = word if not line else line + " " + word
+                if self.text_width(trial, scale) <= max_width:
+                    line = trial
+                else:
+                    if line:
+                        lines.append(line)
+                    line = word
+            if line:
+                lines.append(line)
+        return lines
 
 
-def rule(canvas, y, weight=1):
-    """A solid horizontal rule spanning the content width."""
-    canvas.rectangle([EDGE, y, PAGE_W - EDGE, y + weight - 1], fill=INK)
+# ---------------------------------------------------------------- PNG
+
+def png_bytes(canvas):
+    """Encode the canvas as a PNG (colour type 2, 8-bit, filter 0)."""
+    w, h = canvas.width, canvas.height
+    raw = bytearray()
+    stride = w * 3
+    buf = canvas.buf
+    for y in range(h):
+        raw.append(0)
+        raw += buf[y * stride:(y + 1) * stride]
+    comp = zlib.compress(bytes(raw), 9)
+
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data +
+                struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) +
+            chunk(b"IDAT", comp) + chunk(b"IEND", b""))
 
 
-# ---------------------------------------------------------------- hero picture
+# ---------------------------------------------------------------- content
 
-def _lerp(a, b, t):
-    """Blend two RGB colours by factor t (0..1)."""
-    return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+MASTHEAD = "THE WORLD TODAY"
+DATELINE = "TUESDAY, 24 NOVEMBER 2026"
 
+CAPTION = ("Tankers cross the strait at dusk as the US naval blockade "
+           "tightens around Iran. (Illustration)")
 
-def _tanker(canvas, cx, water_y, scale, hull, deck):
-    """Draw one tanker silhouette centred on cx, floating on water_y."""
-    hull_w = int(150 * scale)
-    hull_h = int(26 * scale)
-    bow = int(26 * scale)
-    x0 = cx - hull_w // 2
-    x1 = cx + hull_w // 2
-    # Hull: a long body with a tapered bow on the right.
-    canvas.polygon(
-        [
-            (x0, water_y - hull_h),
-            (x1 - bow, water_y - hull_h),
-            (x1, water_y - hull_h // 2),
-            (x1, water_y),
-            (x0, water_y),
-        ],
-        fill=hull,
-    )
-    # White superstructure block and bridge near the stern.
-    sup_w = int(34 * scale)
-    sup_h = int(22 * scale)
-    canvas.rectangle(
-        [x0 + int(16 * scale), water_y - hull_h - sup_h,
-         x0 + int(16 * scale) + sup_w, water_y - hull_h],
-        fill=deck,
-    )
-    canvas.rectangle(
-        [x0 + int(20 * scale), water_y - hull_h - sup_h - int(8 * scale),
-         x0 + int(20 * scale) + int(26 * scale),
-         water_y - hull_h - sup_h],
-        fill=deck,
-    )
-    # Funnel with a dark red band, plus a thin mast and a wisp of smoke.
-    fx = x0 + int(64 * scale)
-    canvas.rectangle(
-        [fx, water_y - hull_h - int(20 * scale),
-         fx + int(10 * scale), water_y - hull_h],
-        fill=(140, 47, 38),
-    )
-    canvas.line(
-        [cx + hull_w // 2 - int(30 * scale), water_y - hull_h,
-         cx + hull_w // 2 - int(30 * scale),
-         water_y - hull_h - int(34 * scale)],
-        fill=hull, width=max(1, int(2 * scale)),
-    )
-    for k, (dx, dy, r) in enumerate(((0, -6, 7), (9, -14, 9), (20, -22, 11))):
-        canvas.ellipse(
-            [fx + dx - r, water_y - hull_h - int(20 * scale) + dy - r,
-             fx + dx + r, water_y - hull_h - int(20 * scale) + dy + r],
-            fill=(168, 160, 152),
-        )
+KICKER = "US-IRAN STANDOFF"
+LEAD_HEAD = ["TRUMP DARES IRAN", "TO TEST BLOCKADE"]
+LEAD_DECK = ("They'll all be at the bottom of the sea, president warns, "
+             "as Tehran readies a 14-tanker convoy and unveils an "
+             "underground missile city.")
 
-
-def paint_strait(canvas, box):
-    """Paint the hero scene: dusk sky, sun, sea, cliffs, three tankers."""
-    x0, y0, x1, y1 = box
-    width = x1 - x0
-    horizon = y0 + int((y1 - y0) * 0.58)
-
-    # Sky: warm orange at the top fading into a dusky mauve at the sea.
-    sky_top = (233, 166, 106)
-    sky_low = (146, 104, 118)
-    for yy in range(y0, horizon):
-        t = (yy - y0) / max(1, horizon - y0)
-        canvas.line([(x0, yy), (x1, yy)], fill=_lerp(sky_top, sky_low, t))
-
-    # Low sun with a soft glow, sitting just above the horizon.
-    sun_cx, sun_cy = x0 + int(width * 0.66), horizon - 46
-    canvas.ellipse(
-        [sun_cx - 42, sun_cy - 42, sun_cx + 42, sun_cy + 42],
-        fill=(240, 190, 128),
-    )
-    canvas.ellipse(
-        [sun_cx - 26, sun_cy - 26, sun_cx + 26, sun_cy + 26],
-        fill=(246, 216, 152),
-    )
-
-    # Sea: dark blue-grey with a few pale, flat wave streaks.
-    canvas.rectangle([x0, horizon, x1, y1], fill=(61, 76, 94))
-    streaks = [
-        (0.10, 0.05, 0.30), (0.22, 0.55, 0.28), (0.30, 0.20, 0.42),
-        (0.42, 0.62, 0.30), (0.52, 0.08, 0.36), (0.63, 0.45, 0.40),
-        (0.74, 0.25, 0.30), (0.85, 0.58, 0.34), (0.94, 0.12, 0.26),
-    ]
-    sea_h = y1 - horizon
-    for frac, start, length in streaks:
-        yy = horizon + int(sea_h * frac)
-        sx = x0 + int(width * start)
-        ex = sx + int(width * length)
-        canvas.line([(sx, yy), (ex, yy)], fill=(96, 112, 130), width=2)
-
-    # Rocky headlands left and right, closing the strait.
-    canvas.polygon(
-        [(x0, y1), (x0, y0 + 30), (x0 + 150, y0 + 96),
-         (x0 + 210, y0 + 150), (x0 + 170, y1)],
-        fill=(46, 42, 40),
-    )
-    canvas.polygon(
-        [(x1, y1), (x1, y0 + 64), (x1 - 120, y0 + 118),
-         (x1 - 190, y0 + 168), (x1 - 150, y1)],
-        fill=(40, 37, 35),
-    )
-
-    # Three tankers: one distant near the horizon, two closer in.
-    _tanker(canvas, x0 + int(width * 0.52), horizon + 26, 0.42,
-            (24, 24, 30), (150, 154, 158))
-    _tanker(canvas, x0 + int(width * 0.72), horizon + 78, 0.72,
-            (22, 22, 28), (196, 199, 203))
-    _tanker(canvas, x0 + int(width * 0.38), y1 - 18, 1.05,
-            (18, 18, 24), (207, 210, 214))
-
-    # Two gulls high in the sky.
-    for gx, gy in ((x0 + 120, y0 + 42), (x0 + 210, y0 + 66)):
-        canvas.line([(gx - 10, gy), (gx, gy - 6), (gx + 10, gy)],
-                    fill=(60, 52, 48), width=2)
-
-    # Thin black frame around the picture.
-    canvas.rectangle([x0, y0, x1 - 1, y1 - 1], outline=INK, width=2)
-
-
-# ---------------------------------------------------------------- story cells
-
-def story_cell(canvas, x, y, width, headline, body, head_font, body_font):
-    """One grid item: bold headline, then a short body paragraph."""
-    y = paint_lines(
-        canvas, wrap_text(canvas, headline, head_font, width),
-        head_font, x, y, 27,
-    )
-    y += 4
-    y = paint_lines(
-        canvas, wrap_text(canvas, body, body_font, width),
-        body_font, x, y, 21,
-    )
-    return y
-
-
-# ---------------------------------------------------------------- the page
-
-LEAD_HEADLINE = "TRUMP DARES IRAN: 'AT THE BOTTOM OF THE SEA'"
-LEAD_DECK = (
-    "US president warns Iranian tankers that test the naval blockade will "
-    "be sunk; Tehran shows off an underground 'missile city' and readies a "
-    "14-tanker convoy as strikes may resume in the new year."
-)
-PHOTO_CAPTION = (
-    "Tankers gather near Kharg Island as Iran threatens to test the US blockade."
-)
-
-GRID_STORIES = [
+STORIES = [
     ("BANTEN FIRE TOLL 24",
-     "A blaze at a candy factory in Serang, Indonesia, kills 24; about 30 "
-     "workers still missing as rescuers search the wreckage."),
+     "A blaze at a candy factory in Serang, Indonesia, kills 24; about "
+     "30 workers still missing."),
     ("HOLY CITIES BY RAIL",
      "Modi and Nepal PM Balendra Shah flag off the Saryu-Kamala Express; "
-     "the first train reaches Janakpur this morning."),
+     "the first train reaches Janakpur today."),
     ("COP31 IN RUINS",
      "Climate talks in Antalya collapse with no deal after record "
-     "overtime; the draft never even mentioned fossil fuels."),
+     "overtime; the draft never mentioned fossil fuels."),
     ("153 DRONES OVERNIGHT",
      "Russia fires 153 drones at Ukraine, 60 of them jet-powered; Kyiv "
-     "region counts its dead after a block of flats collapses."),
+     "counts its dead after a block of flats collapses."),
     ("COURT: MYANMAR GUILTY",
      "The World Court finds Myanmar committed genocide against the "
-     "Rohingya \u2014 the first state ever held responsible \u2014 and orders "
-     "reparations."),
+     "Rohingya and orders reparations."),
     ("VERSTAPPEN WINS VEGAS",
-     "Max Verstappen takes a chaotic Las Vegas GP \u2014 35 lead changes, "
-     "352 overtakes \u2014 beating Norris by 0.639 seconds."),
+     "Max Verstappen takes a chaotic Las Vegas Grand Prix, beating "
+     "Norris by 0.639 seconds."),
 ]
 
-SPORT_TEXT = (
-    "New Zealand bat out the final day to draw the Wellington Test; India "
-    "declared on 720/9, Pant 128, but Mitchell and Phillips hold firm at 239/5."
-)
+SPORT = ("SPORT  New Zealand bat out the final day to draw the Wellington "
+         "Test; India declared on 720/9, Pant 128.")
 
+
+# ---------------------------------------------------------------- scene
+
+def draw_sunset(canvas, x, y, w, h):
+    """Sunset over a strait: banded sky, sun, sea, two tankers, birds."""
+    horizon = y + int(h * 0.62)
+    top = (255, 122, 42)
+    mid = (255, 176, 88)
+    low = (250, 222, 150)
+    for yy in range(y, horizon):
+        t = (yy - y) / max(1, horizon - y)
+        if t < 0.55:
+            a, b, f = top, mid, t / 0.55
+        else:
+            a, b, f = mid, low, (t - 0.55) / 0.45
+        colour = tuple(int(a[i] + (b[i] - a[i]) * f) for i in range(3))
+        canvas.fill_rect(x, yy, w, 1, colour)
+
+    # sun with a pale halo
+    sun_x = x + int(w * 0.72)
+    sun_y = y + int(h * 0.38)
+    canvas.fill_circle(sun_x, sun_y, 52, (255, 214, 130))
+    canvas.fill_circle(sun_x, sun_y, 40, (255, 232, 158))
+
+    # birds
+    for bx, by, s in ((x + 150, y + 52, 9), (x + 205, y + 74, 7),
+                      (x + 250, y + 44, 8)):
+        canvas.line(bx - s, by, bx, by + 5, INK)
+        canvas.line(bx, by + 5, bx + s, by, INK)
+
+    # sea
+    canvas.fill_rect(x, horizon, w, y + h - horizon, (18, 62, 92))
+    for yy in range(horizon + 14, y + h - 6, 16):
+        for xx in range(x + 24, x + w - 60, 120):
+            canvas.fill_rect(xx, yy, 54, 2, (70, 128, 158))
+
+    # tanker silhouettes
+    hull = (24, 24, 34)
+    # big tanker, left
+    canvas.fill_poly([(x + 70, horizon + 34), (x + 500, horizon + 34),
+                      (x + 520, horizon + 52), (x + 500, horizon + 70),
+                      (x + 70, horizon + 70)], hull)
+    canvas.fill_rect(x + 380, horizon + 6, 62, 28, hull)     # deckhouse
+    canvas.fill_rect(x + 452, horizon - 4, 18, 38, hull)     # funnel
+    canvas.fill_rect(x + 130, horizon - 2, 4, 36, hull)      # mast
+    # reflection streaks
+    for xx in range(x + 90, x + 500, 46):
+        canvas.fill_rect(xx, horizon + 74, 22, 3, (70, 128, 158))
+    # small tanker, right
+    canvas.fill_poly([(x + 590, horizon + 44), (x + 880, horizon + 44),
+                      (x + 896, horizon + 58), (x + 880, horizon + 74),
+                      (x + 590, horizon + 74)], hull)
+    canvas.fill_rect(x + 780, horizon + 20, 46, 24, hull)
+    canvas.fill_rect(x + 832, horizon + 12, 14, 32, hull)
+    for xx in range(x + 610, x + 880, 52):
+        canvas.fill_rect(xx, horizon + 78, 20, 3, (70, 128, 158))
+
+
+# ---------------------------------------------------------------- layout
 
 def build_front_page():
-    """Assemble the whole front page and return the Pillow image."""
-    page = Image.new("RGB", (PAGE_W, PAGE_H), PAPER)
-    canvas = ImageDraw.Draw(page)
-
-    masthead = pick_font("serif_bold", 84)
-    dateline = pick_font("sans_bold", 23)
-    caption_font = pick_font("serif_italic", 19)
-    lead_font = pick_font("serif_bold", 48)
-    deck_font = pick_font("serif", 20)
-    cell_head = pick_font("serif_bold", 22)
-    cell_body = pick_font("serif", 16)
-    sport_tag = pick_font("sans_bold", 20)
-    sport_body = pick_font("serif", 17)
-
-    y = 12
-    canvas.text((PAGE_W // 2, y), "THE WORLD TODAY", font=masthead,
-                anchor="ma", fill=INK)
-    y = 102
-    canvas.text((PAGE_W // 2, y), "TUESDAY, 24 NOVEMBER 2026",
-                font=dateline, anchor="ma", fill=INK)
-
-    rule(canvas, 136, weight=3)
-    rule(canvas, 142, weight=1)
-
-    # Hero picture and its caption. The picture is 280 tall so the page
-    # fills the frame instead of leaving dead space at the foot.
-    paint_strait(canvas, (EDGE, 150, PAGE_W - EDGE, 430))
-    canvas.text((PAGE_W // 2, 438), PHOTO_CAPTION, font=caption_font,
-                anchor="ma", fill=FAINT)
-
-    # Lead story: big headline, then the deck paragraph.
-    y = 466
-    y = paint_lines(canvas, wrap_text(canvas, LEAD_HEADLINE, lead_font, INNER_W),
-                    lead_font, EDGE, y, 54)
-    y += 8
-    y = paint_lines(canvas, wrap_text(canvas, LEAD_DECK, deck_font, INNER_W),
-                    deck_font, EDGE, y, 26)
+    page = Canvas(PAGE_W, PAGE_H, PAPER)
+    y = 22
+    page.rule(EDGE, y, INNER_W, 3)
     y += 12
-    rule(canvas, y)
+    page.text_centred(PAGE_W // 2, y, MASTHEAD, 7, INK)
+    y += 7 * 7 + 12
+    page.rule(EDGE, y, INNER_W, 2)
+    y += 10
+    page.text_centred(PAGE_W // 2, y, DATELINE, 2, INK)
+    y += 7 * 2 + 10
+    page.rule(EDGE, y, INNER_W, 2)
+    y += 12
 
-    # Two-column grid of six short stories, three rows.
-    col_w = (INNER_W - 28) // 2
-    col_x = [EDGE, EDGE + col_w + 28]
-    grid_top = y + 16
-    for row in range(3):
-        row_y = grid_top + row * 100
-        for col in range(2):
-            headline, body = GRID_STORIES[row * 2 + col]
-            story_cell(canvas, col_x[col], row_y, col_w,
-                       headline, body, cell_head, cell_body)
+    # hero illustration
+    hero_h = 280
+    page.rule(EDGE, y, INNER_W, 2)
+    page.rule(EDGE, y + hero_h, INNER_W, 2)
+    page.rule(EDGE, y, 2, hero_h)
+    page.rule(EDGE + INNER_W - 2, y, 2, hero_h)
+    draw_sunset(page, EDGE + 2, y + 2, INNER_W - 4, hero_h - 4)
+    y += hero_h + 10
+    for line in page.wrap(CAPTION, 2, INNER_W):
+        page.text(EDGE, y, line, 2, FAINT)
+        y += 7 * 2 + 5
+    y += 8
 
-    # Sport strip along the bottom.
-    sport_y = grid_top + 3 * 100 + 8
-    rule(canvas, sport_y)
-    sport_y += 10
-    canvas.text((EDGE, sport_y), "SPORT", font=sport_tag, fill=INK)
-    paint_lines(
-        canvas,
-        wrap_text(canvas, SPORT_TEXT, sport_body, INNER_W - 96),
-        sport_body, EDGE + 96, sport_y, 23,
-    )
+    # lead story
+    page.fill_rect(EDGE, y, 10, 14, RED)
+    page.text(EDGE + 18, y, KICKER, 2, RED)
+    y += 7 * 2 + 10
+    for line in LEAD_HEAD:
+        page.text(EDGE, y, line, 4, INK)
+        y += 7 * 4 + 6
+    y += 4
+    for line in page.wrap(LEAD_DECK, 2, INNER_W):
+        page.text(EDGE, y, line, 2, FAINT)
+        y += 7 * 2 + 6
+    y += 10
+    page.rule(EDGE, y, INNER_W, 2)
+    y += 14
+
+    # six stories, two columns x three rows
+    col_w = (INNER_W - 20) // 2
+    row_h = 106
+    for i, (head, body) in enumerate(STORIES):
+        col = i % 2
+        row = i // 2
+        sx = EDGE + col * (col_w + 20)
+        sy = y + row * row_h
+        head_lines = page.wrap(head, 3, col_w)
+        page.text(sx, sy, head_lines[0], 3, INK)
+        by = sy + 7 * 3 + 8
+        for line in page.wrap(body, 2, col_w)[:3]:
+            page.text(sx, by, line, 2, INK)
+            by += 7 * 2 + 6
+    y += 3 * row_h + 6
+
+    # sport strip
+    page.rule(EDGE, y, INNER_W, 2)
+    y += 12
+    tag = "SPORT"
+    tag_w = page.text_width(tag, 2) + 16
+    page.fill_rect(EDGE, y, tag_w, 7 * 2 + 8, INK)
+    page.text(EDGE + 8, y + 4, tag, 2, PAPER)
+    sx = EDGE + tag_w + 12
+    for line in page.wrap(SPORT[len("SPORT  "):], 2, INNER_W - tag_w - 12)[:2]:
+        page.text(sx, y + 4, line, 2, INK)
+        y += 7 * 2 + 6
+    y += 14
+    page.rule(EDGE, y, INNER_W, 3)
 
     return page
 
 
-def main():
-    """Render the page and save it next to this script."""
-    page = build_front_page()
-    here = Path(__file__).resolve().parent
-    target = here / "entry.png"
-    page.save(target, format="PNG")
-    print(f"wrote {target}")
+# ---------------------------------------------------------------- entry
 
-    extra_dir = os.environ.get("MAKEFUN_OUTPUT_DIR")
-    if extra_dir:
-        dest = Path(extra_dir) / "entry.png"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(target, dest)
-        print(f"also copied to {dest}")
+def main():
+    data = png_bytes(build_front_page())
+
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR")
+    targets = []
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        targets.append(Path(out_dir) / "entry.png")
+    targets.append(Path(__file__).resolve().parent / "entry.png")
+
+    wrote = False
+    for target in targets:
+        try:
+            target.write_bytes(data)
+            print(f"wrote {target} ({len(data)} bytes)")
+            wrote = True
+        except OSError as exc:
+            # The grader mounts the repo read-only; the output dir is
+            # the real destination, so a failed local copy is harmless.
+            print(f"skip {target}: {exc}")
+    if not wrote:
+        raise SystemExit("could not write entry.png anywhere")
 
 
 if __name__ == "__main__":
